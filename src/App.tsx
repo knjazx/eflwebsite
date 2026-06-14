@@ -29,8 +29,8 @@ import {
   Tier,
   User,
 } from "./data";
+import { loadLeagueData, saveLeagueData } from "./leagueDataService";
 
-const storeKey = "efl-store-v1";
 const sessionKey = "efl-session-v1";
 const themeKey = "efl-theme-v1";
 const langKey = "efl-lang-v1";
@@ -41,15 +41,6 @@ const statuses: MatchStatus[] = ["upcoming", "live", "finished"];
 const blankTeam: Team = { id: "", name: "", tag: "", tier: "Tier-3", region: "EU", logo: "", points: 500, rankTrend: 0, wins: 0, losses: 0, playerIds: [] };
 const blankPlayer: Player = { id: "", nick: "", realName: "", role: "Entry", country: "UA", teamId: "", rating: 1, maps: 0, kd: 1, adr: 70, clutch: 0 };
 const blankMatch: Match = { id: "", teamAId: "", teamBId: "", status: "upcoming", startsAt: "2026-06-15T18:00", scoreA: 0, scoreB: 0, event: "EFL Match", format: "BO3" };
-
-function readStore(): Store {
-  try {
-    const raw = localStorage.getItem(storeKey);
-    return raw ? JSON.parse(raw) : seedStore;
-  } catch {
-    return seedStore;
-  }
-}
 
 function uid(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 7)}`;
@@ -64,7 +55,9 @@ function isImageLogo(value?: string) {
 }
 
 function App() {
-  const [store, setStore] = useState<Store>(readStore);
+  const [store, setStore] = useState<Store>(seedStore);
+  const [dataStatus, setDataStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [dataError, setDataError] = useState("");
   const [page, setPage] = useState<"home" | "ratings" | "matches" | "admin" | "team" | "player">("home");
   const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null);
   const [selectedPlayerId, setSelectedPlayerId] = useState<string | null>(null);
@@ -76,7 +69,23 @@ function App() {
   const t = labels[lang];
   const isAdmin = session === "admin";
 
-  useEffect(() => localStorage.setItem(storeKey, JSON.stringify(store)), [store]);
+  useEffect(() => {
+    let alive = true;
+    loadLeagueData()
+      .then((remoteStore) => {
+        if (!alive) return;
+        setStore(remoteStore);
+        setDataStatus("ready");
+      })
+      .catch((error) => {
+        if (!alive) return;
+        setDataError(error instanceof Error ? error.message : "Failed to load league data");
+        setDataStatus("error");
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem(themeKey, theme);
@@ -104,39 +113,54 @@ function App() {
     setPage("player");
   }
 
+  async function persistStore(nextStore: Store) {
+    setStore(nextStore);
+    setDataStatus("ready");
+    try {
+      await saveLeagueData(nextStore);
+    } catch (error) {
+      setDataStatus("error");
+      setDataError(error instanceof Error ? error.message : "Failed to save league data");
+    }
+  }
+
   function saveTeam(team: Team) {
     const next = { ...team, id: team.id || uid("team"), logo: team.logo || team.tag.slice(0, 2).toUpperCase() };
-    setStore((s) => ({
-      ...s,
-      teams: s.teams.some((item) => item.id === next.id) ? s.teams.map((item) => (item.id === next.id ? next : item)) : [...s.teams, next],
-      players: s.players.map((player) => ({ ...player, teamId: next.playerIds.includes(player.id) ? next.id : player.teamId === next.id ? "" : player.teamId })),
-    }));
+    const nextStore = {
+      ...store,
+      teams: store.teams.some((item) => item.id === next.id) ? store.teams.map((item) => (item.id === next.id ? next : item)) : [...store.teams, next],
+      players: store.players.map((player) => ({ ...player, teamId: next.playerIds.includes(player.id) ? next.id : player.teamId === next.id ? "" : player.teamId })),
+    };
+    void persistStore(nextStore);
   }
 
   function savePlayer(player: Player) {
     const next = { ...player, id: player.id || uid("player") };
-    setStore((s) => ({
-      ...s,
-      players: s.players.some((item) => item.id === next.id) ? s.players.map((item) => (item.id === next.id ? next : item)) : [...s.players, next],
-      teams: s.teams.map((team) => ({
+    const nextStore = {
+      ...store,
+      players: store.players.some((item) => item.id === next.id) ? store.players.map((item) => (item.id === next.id ? next : item)) : [...store.players, next],
+      teams: store.teams.map((team) => ({
         ...team,
         playerIds: next.teamId === team.id ? Array.from(new Set([...team.playerIds, next.id])) : team.playerIds.filter((id) => id !== next.id),
       })),
-    }));
+    };
+    void persistStore(nextStore);
   }
 
   function saveMatch(match: Match) {
     const next = { ...match, id: match.id || uid("match") };
-    setStore((s) => ({ ...s, matches: s.matches.some((item) => item.id === next.id) ? s.matches.map((item) => (item.id === next.id ? next : item)) : [...s.matches, next] }));
+    const nextStore = { ...store, matches: store.matches.some((item) => item.id === next.id) ? store.matches.map((item) => (item.id === next.id ? next : item)) : [...store.matches, next] };
+    void persistStore(nextStore);
   }
 
   function deleteItem(kind: "teams" | "players" | "matches", id: string) {
-    setStore((s) => ({
-      ...s,
-      [kind]: s[kind].filter((item) => item.id !== id),
-      teams: kind === "players" ? s.teams.map((team) => ({ ...team, playerIds: team.playerIds.filter((pid) => pid !== id) })) : kind === "teams" ? s.teams.filter((team) => team.id !== id) : s.teams,
-      players: kind === "teams" ? s.players.map((player) => (player.teamId === id ? { ...player, teamId: "" } : player)) : kind === "players" ? s.players.filter((player) => player.id !== id) : s.players,
-    }));
+    const nextStore = {
+      ...store,
+      [kind]: store[kind].filter((item) => item.id !== id),
+      teams: kind === "players" ? store.teams.map((team) => ({ ...team, playerIds: team.playerIds.filter((pid) => pid !== id) })) : kind === "teams" ? store.teams.filter((team) => team.id !== id) : store.teams,
+      players: kind === "teams" ? store.players.map((player) => (player.teamId === id ? { ...player, teamId: "" } : player)) : kind === "players" ? store.players.filter((player) => player.id !== id) : store.players,
+    };
+    void persistStore(nextStore);
   }
 
   return (
@@ -177,10 +201,12 @@ function App() {
       </header>
 
       <main className="shell page-enter">
+        {dataStatus === "loading" && <div className="dataBanner">Loading league data...</div>}
+        {dataStatus === "error" && <div className="dataBanner errorBanner">Supabase: {dataError}</div>}
         {page === "home" && <Home t={t} teams={rankedTeams} players={rankedPlayers} matches={store.matches} teamById={teamById} openTeam={openTeamPage} openPlayer={openPlayerPage} />}
         {page === "ratings" && <Ratings t={t} teams={rankedTeams} players={rankedPlayers} teamById={teamById} openTeam={openTeamPage} openPlayer={openPlayerPage} />}
         {page === "matches" && <Matches t={t} matches={store.matches} teamById={teamById} openTeam={openTeamPage} />}
-        {page === "admin" && <Admin t={t} isAdmin={isAdmin} store={store} setStore={setStore} saveTeam={saveTeam} savePlayer={savePlayer} saveMatch={saveMatch} deleteItem={deleteItem} />}
+        {page === "admin" && <Admin t={t} isAdmin={isAdmin} store={store} updateStore={persistStore} saveTeam={saveTeam} savePlayer={savePlayer} saveMatch={saveMatch} deleteItem={deleteItem} />}
         {page === "team" && <TeamPage t={t} team={teamById(selectedTeamId || undefined)} players={store.players} openPlayer={openPlayerPage} back={() => setPage("ratings")} />}
         {page === "player" && <PlayerPage t={t} player={playerById(selectedPlayerId || undefined)} team={teamById(playerById(selectedPlayerId || undefined)?.teamId)} isAdmin={isAdmin} updatePlayer={savePlayer} openTeam={openTeamPage} back={() => setPage("ratings")} />}
       </main>
@@ -196,7 +222,7 @@ function App() {
         <button className="floatBtn" onClick={() => setSocialOpen(!socialOpen)} title={t.social}><MessageCircle /></button>
       </div>
 
-      {modal?.type === "auth" && <AuthModal t={t} mode={modal.mode || "login"} store={store} setStore={setStore} setSession={setSession} close={() => setModal(null)} />}
+      {modal?.type === "auth" && <AuthModal t={t} mode={modal.mode || "login"} store={store} updateStore={persistStore} setSession={setSession} close={() => setModal(null)} />}
       {modal?.type === "cabinet" && currentUser && <Cabinet t={t} user={currentUser} team={teamById(currentUser.teamId)} logout={() => { setSession(null); setModal(null); }} close={() => setModal(null)} />}
     </div>
   );
@@ -446,16 +472,16 @@ function EmptyProfile({ t, back }: { t: typeof labels.ru; back: () => void }) {
   return <section className="panel adminGate"><h2>{t.playerProfile}</h2><p>{t.noTeam}</p><button className="primary" onClick={back}><ArrowLeft size={17} /> {t.ratings}</button></section>;
 }
 
-function AuthModal({ t, mode, store, setStore, setSession, close }: { t: typeof labels.ru; mode: "login" | "register"; store: Store; setStore: (s: Store) => void; setSession: (s: string) => void; close: () => void }) {
+function AuthModal({ t, mode, store, updateStore, setSession, close }: { t: typeof labels.ru; mode: "login" | "register"; store: Store; updateStore: (store: Store) => Promise<void>; setSession: (s: string) => void; close: () => void }) {
   const [form, setForm] = useState({ nick: "", password: "" });
   const [authMode, setAuthMode] = useState(mode);
   const [error, setError] = useState("");
-  function submit(e: FormEvent) {
+  async function submit(e: FormEvent) {
     e.preventDefault();
     if (authMode === "login" && form.nick === "admin" && form.password === "adminknjazx") { setSession("admin"); close(); return; }
     if (authMode === "register") {
       if (!form.nick || !form.password || store.users.some((u) => u.nick === form.nick)) { setError(t.authInvalid); return; }
-      setStore({ ...store, users: [...store.users, { id: uid("user"), nick: form.nick, password: form.password, rating: 1, matches: 0 }] });
+      await updateStore({ ...store, users: [...store.users, { id: uid("user"), nick: form.nick, password: form.password, rating: 1, matches: 0 }] });
       setSession(form.nick); close(); return;
     }
     const user = store.users.find((u) => u.nick === form.nick && u.password === form.password);
@@ -469,7 +495,7 @@ function Cabinet({ t, user, team, logout, close }: { t: typeof labels.ru; user: 
   return <Modal close={close} title={t.cabinet}><div className="profileHero"><UserCircle size={58} /><div><h2>{user.nick}</h2><p>{t.userTeam}: {team?.name || t.noTeam}</p></div></div><Stats items={[[t.rating, user.rating.toFixed(2)], [t.matchesStat, user.matches], [t.tier, team?.tier || "-"]]} /><button onClick={logout}>{t.logout}</button></Modal>;
 }
 
-function Admin({ t, isAdmin, store, setStore, saveTeam, savePlayer, saveMatch, deleteItem }: { t: typeof labels.ru; isAdmin: boolean; store: Store; setStore: (store: Store) => void; saveTeam: (team: Team) => void; savePlayer: (player: Player) => void; saveMatch: (match: Match) => void; deleteItem: (kind: "teams" | "players" | "matches", id: string) => void }) {
+function Admin({ t, isAdmin, store, updateStore, saveTeam, savePlayer, saveMatch, deleteItem }: { t: typeof labels.ru; isAdmin: boolean; store: Store; updateStore: (store: Store) => Promise<void>; saveTeam: (team: Team) => void; savePlayer: (player: Player) => void; saveMatch: (match: Match) => void; deleteItem: (kind: "teams" | "players" | "matches", id: string) => void }) {
   const [tab, setTab] = useState<"teams" | "players" | "matches" | "users">("teams");
   const [team, setTeam] = useState<Team>(blankTeam);
   const [player, setPlayer] = useState<Player>(blankPlayer);
@@ -490,7 +516,7 @@ function Admin({ t, isAdmin, store, setStore, saveTeam, savePlayer, saveMatch, d
   }
   function assignUserTeam(userId: string, teamId: string) {
     const nextUsers = store.users.map((user) => user.id === userId ? { ...user, teamId } : user);
-    setStore({ ...store, users: nextUsers });
+    void updateStore({ ...store, users: nextUsers });
   }
   if (!isAdmin) return <section className="panel adminGate"><Shield size={36} /><h2>{t.adminPanel}</h2><p>{t.adminHint}</p><p>{t.adminLoginHelp}</p></section>;
   return (

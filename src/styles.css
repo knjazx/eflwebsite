@@ -186,6 +186,23 @@ select {
   margin: 22px auto 80px;
 }
 
+.dataBanner {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(34, 137, 179, 0.22);
+  border-radius: 6px;
+  background: rgba(34, 137, 179, 0.1);
+  color: inherit;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.errorBanner {
+  border-color: rgba(193, 59, 59, 0.3);
+  background: rgba(193, 59, 59, 0.1);
+  color: #c13b3b;
+}
+
 .page-enter {
   animation: pageIn 0.28s ease both;
 }
